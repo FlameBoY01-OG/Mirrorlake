@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+/* Full-bleed solid background — no transparency, no wallpaper bleed-through. */
+html,
+body,
+#root {
+  min-height: 100vh;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  background-color: #FAFAF8; /* bg-primary design token */
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}

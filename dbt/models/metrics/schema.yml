@@ -1,0 +1,37 @@
+version: 2
+
+models:
+  - name: daily_revenue
+    description: "Per-day revenue, order counts, and delivery metrics."
+    columns:
+      - name: date
+        tests:
+          - not_null
+          - unique
+  - name: customer_ltv
+    description: "Lifetime value per customer (delivered orders)."
+    columns:
+      - name: id
+        tests:
+          - not_null
+  - name: order_funnel
+    description: "Order counts per status for the funnel chart."
+    columns:
+      - name: status
+        tests:
+          - not_null
+          - unique
+  - name: revenue_by_city
+    description: "Revenue and order counts per customer city."
+    columns:
+      - name: city
+        tests:
+          - not_null
+          - unique
+  - name: top_products
+    description: "Units sold and revenue per product."
+    columns:
+      - name: product_id
+        tests:
+          - not_null
+          - unique

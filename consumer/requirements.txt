@@ -1,0 +1,4 @@
+confluent-kafka==2.5.0
+pyiceberg[s3,pyarrow]==0.7.1
+pyarrow==17.0.0
+python-dotenv==1.0.1

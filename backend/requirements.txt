@@ -1,0 +1,9 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+confluent-kafka==2.5.0
+trino==0.329.0
+psycopg2-binary==2.9.9
+requests==2.32.3
+httpx==0.27.2
+python-dotenv==1.0.1
+dbt-trino==1.8.1

@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Raw CDC events landed by the Iceberg consumer (append-only audit log).
+      One row per change with op code and source LSN.
+    database: iceberg
+    schema: shop
+    loaded_at_field: _source_ts
+    freshness:
+      warn_after: { count: 1, period: hour }
+      error_after: { count: 6, period: hour }
+    tables:
+      - name: customers_raw
+      - name: products_raw
+      - name: orders_raw
+      - name: order_items_raw

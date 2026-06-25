@@ -1,0 +1,275 @@
+# Mirrorlake — CDC lakehouse pipeline.
+# Single `docker compose up` brings up the whole stack. Services are added phase
+# by phase (SPEC §20); Phase 1 = Postgres source DB with logical replication.
+
+name: mirrorlake
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: cdc_postgres
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  data-generator:
+    build: ./data_generator
+    container_name: cdc_data_generator
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: cdc_kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:9092,CONTROLLER://kafka:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    healthcheck:
+      # Probe the actual internal listener (PLAINTEXT binds to kafka:9092, not loopback).
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: cdc_schema_registry
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  kafka-connect:
+    image: debezium/connect:2.7.3.Final
+    container_name: cdc_kafka_connect
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: cdc-connect
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: cdc_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: cdc_minio_setup
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do echo 'waiting for minio...'; sleep 2; done;
+      mc mb --ignore-existing local/warehouse;
+      echo 'warehouse bucket ready';
+      "
+    restart: "no"
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:latest
+    container_name: cdc_iceberg_rest
+    user: root                 # so it can write the catalog DB to the volume
+    ports:
+      - "8181:8181"
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      # Persist the catalog to a file on a volume (the default in-memory SQLite
+      # silently loses all tables, which breaks the whole pipeline).
+      # busy_timeout: wait for the lock instead of failing (the consumer + dbt
+      # both write the catalog). WAL: let readers not block the writer.
+      CATALOG_URI: "jdbc:sqlite:/persist/catalog.db?busy_timeout=30000&journal_mode=WAL"
+    volumes:
+      - iceberg_catalog:/persist
+    depends_on:
+      minio:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+
+  trino:
+    image: trinodb/trino:426
+    container_name: cdc_trino
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog
+      - ./trino/config/config.properties:/etc/trino/config.properties
+    depends_on:
+      iceberg-rest:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/v1/info | grep -q '\"starting\":false' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 15
+
+  consumer:
+    build: ./consumer
+    container_name: cdc_consumer
+    env_file: .env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-connect:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_started
+    restart: unless-stopped
+
+  # dbt runner — on-demand job (not started by `up`). Run with:
+  #   docker compose run --rm dbt build
+  dbt:
+    build: ./dbt
+    container_name: cdc_dbt
+    env_file: .env
+    volumes:
+      - ./dbt:/dbt          # use the live project (no rebuild on model changes)
+    depends_on:
+      trino:
+        condition: service_healthy
+    profiles: ["jobs"]
+
+  backend:
+    build: ./backend
+    container_name: cdc_backend
+    env_file: .env
+    environment:
+      DBT_PROJECT_DIR: /dbt
+      DBT_PROFILES_DIR: /dbt
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app          # hot reload
+      - ./dbt:/dbt              # so /dbt/run can build the models
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-connect:
+        condition: service_healthy
+      trino:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend-monitor:
+    build: ./frontend-monitor
+    container_name: cdc_frontend_monitor
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend-monitor:/app
+      - /app/node_modules      # keep image's node_modules (don't shadow with host)
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  frontend-exec:
+    build: ./frontend-exec
+    container_name: cdc_frontend_exec
+    ports:
+      - "5174:5174"
+    volumes:
+      - ./frontend-exec:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:
+  iceberg_catalog:

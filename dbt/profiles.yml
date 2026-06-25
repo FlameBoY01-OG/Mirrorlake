@@ -1,0 +1,14 @@
+cdc_pipeline:
+  target: trino
+  outputs:
+    trino:
+      type: trino
+      method: none
+      host: "{{ env_var('TRINO_HOST', 'trino') }}"
+      port: "{{ env_var('TRINO_PORT', '8080') | int }}"
+      user: "{{ env_var('TRINO_USER', 'admin') }}"
+      catalog: iceberg
+      schema: shop
+      # 1 thread: the SQLite-backed Iceberg REST catalog is single-writer, so
+      # concurrent table renames fail. Serialize dbt's catalog operations.
+      threads: 1

@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: orders
+    description: "Deduplicated orders, one row per order id (latest LSN wins)."
+    columns:
+      - name: id
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: id
+  - name: customers
+    description: "Deduplicated customers, one row per customer id."
+    columns:
+      - name: id
+        tests:
+          - not_null
+          - unique
